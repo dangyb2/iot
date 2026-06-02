@@ -1,0 +1,29 @@
+# ==================== FLUTTER ====================
+smart_apt_ui/build/
+smart_apt_ui/.dart_tool/
+smart_apt_ui/.flutter-plugins
+smart_apt_ui/.flutter-plugins-dependencies
+smart_apt_ui/.packages
+smart_apt_ui/pubspec.lock
+
+# ==================== SPRING BOOT ====================
+server/target/
+server/.mvn/
+*.jar
+*.war
+*.class
+
+# ==================== ESP32 / ARDUINO ====================
+device/.pio/
+device/.vscode/
+
+# ==================== INTELLIJ / IDE ====================
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# ==================== HỆ THỐNG ====================
+.DS_Store
+Thumbs.db
+*.log
