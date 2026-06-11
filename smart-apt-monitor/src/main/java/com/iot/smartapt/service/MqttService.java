@@ -21,12 +21,11 @@ public class MqttService {
     private SensorDataRepository repository;
 
     @Autowired
-    private DeviceStatusService statusService;   // ← THIS was missing
+    private DeviceStatusService statusService;
 
     @PostConstruct
     public void connectToBroker() {
         try {
-            // Read broker URL from environment (for Docker), default to localhost
             String brokerUrl = System.getenv("MQTT_BROKER_URL") != null
                     ? System.getenv("MQTT_BROKER_URL")
                     : "tcp://192.168.137.1:1883";
@@ -37,33 +36,66 @@ public class MqttService {
 
             ObjectMapper mapper = new ObjectMapper();
 
-            // Subscribe to device status topic (LWT messages)
+            // Subscribe trạng thái thiết bị (LWT)
             client.subscribe("apartment/status", (topic, msg) -> {
                 String payload = new String(msg.getPayload());
                 System.out.println("📡 Device status: " + payload);
-                boolean online = payload.contains("\"online\":true");
-                statusService.setOnline(online);
+                statusService.setOnline(payload.contains("\"online\":true"));
             });
 
-            // Subscribe to sensor data topic (one combined handler)
+            // Subscribe dữ liệu cảm biến
             client.subscribe("apartment/sensors", (topic, msg) -> {
-                statusService.setOnline(true);  // Sensor message = device alive
-
+                statusService.setOnline(true);
                 String payload = new String(msg.getPayload());
                 System.out.println("📥 Received Data: " + payload);
 
                 try {
                     JsonNode json = mapper.readTree(payload);
 
-                    double temp = json.get("temperature").asDouble();
-                    int light = json.get("light").asInt();
-                    int fan = json.get("fan").asInt();
-                    int led = json.get("led").asInt();
+                    // ── Đọc mảng 5 nhiệt độ ──────────────────────────
+                    double[] temps = new double[5];
+                    double[] humis = new double[5];
+                    int[]    leds  = new int[5];
+
+                    if (json.has("temperatures") && json.get("temperatures").isArray()) {
+                        JsonNode arr = json.get("temperatures");
+                        for (int i = 0; i < Math.min(5, arr.size()); i++)
+                            temps[i] = arr.get(i).asDouble();
+                    } else {
+                        // Tương thích ngược với JSON cũ
+                        temps[0] = json.has("temperature") ? json.get("temperature").asDouble() : 0;
+                    }
+
+                    if (json.has("humidities") && json.get("humidities").isArray()) {
+                        JsonNode arr = json.get("humidities");
+                        for (int i = 0; i < Math.min(5, arr.size()); i++)
+                            humis[i] = arr.get(i).asDouble();
+                    }
+
+                    if (json.has("leds") && json.get("leds").isArray()) {
+                        JsonNode arr = json.get("leds");
+                        for (int i = 0; i < Math.min(5, arr.size()); i++)
+                            leds[i] = arr.get(i).asInt();
+                    } else {
+                        leds[0] = json.has("led") ? json.get("led").asInt() : 0;
+                    }
+
+                    // ── Đọc các field khác ────────────────────────────
+                    int     light     = json.has("light")     ? json.get("light").asInt()         : 0;
+                    int     fan       = json.has("fan")       ? json.get("fan").asInt()           : 0;
                     boolean fanManual = json.has("fanManual") && json.get("fanManual").asBoolean();
                     boolean ledManual = json.has("ledManual") && json.get("ledManual").asBoolean();
-                    SensorData reading = new SensorData(temp, light, fan, led, fanManual, ledManual);
+                    double  distance  = json.has("distance")  ? json.get("distance").asDouble()   : 0;
+                    int     wind      = json.has("wind")      ? json.get("wind").asInt()          : 0;
+
+                    // ── Lưu vào MSSQL ─────────────────────────────────
+                    SensorData reading = new SensorData(
+                            temps, humis, light, fan, leds,
+                            fanManual, ledManual, distance, wind
+                    );
                     repository.save(reading);
-                    System.out.println("💾 Full state saved to MSSQL!");
+                    System.out.println("💾 Saved to MSSQL! T0=" + temps[0]
+                            + " H0=" + humis[0] + " Dist=" + distance + " Wind=" + wind + "%");
 
                 } catch (Exception e) {
                     System.out.println("⚠️ Error parsing JSON: " + e.getMessage());

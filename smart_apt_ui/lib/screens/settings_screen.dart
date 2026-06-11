@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../config.dart';
+
 class SettingsScreen extends StatefulWidget {
   final String authHeader;
 
@@ -16,8 +17,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // Controllers cho từng ngưỡng
   final _tempOnCtrl    = TextEditingController(text: '30');
-  final _tempOffCtrl   = TextEditingController(text: '27');
-  final _tempDangerCtrl = TextEditingController(text: '35');
+  final _tempOffCtrl   = TextEditingController(text: '27.0');
+  final _tempDangerCtrl = TextEditingController(text: '36.0');
+  final _humiOnCtrl    = TextEditingController(text: '80');
+  final _humiOffCtrl   = TextEditingController(text: '72.0');
   final _lightOnCtrl   = TextEditingController(text: '1000');
   final _lightOffCtrl  = TextEditingController(text: '1200');
 
@@ -28,32 +31,71 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _tempOnCtrl.dispose();
     _tempOffCtrl.dispose();
     _tempDangerCtrl.dispose();
+    _humiOnCtrl.dispose();
+    _humiOffCtrl.dispose();
     _lightOnCtrl.dispose();
     _lightOffCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _saveConfig() async {
-    // Validate
-    final tempOn    = double.tryParse(_tempOnCtrl.text);
-    final tempOff   = double.tryParse(_tempOffCtrl.text);
-    final tempDanger = double.tryParse(_tempDangerCtrl.text);
-    final lightOn   = int.tryParse(_lightOnCtrl.text);
-    final lightOff  = int.tryParse(_lightOffCtrl.text);
+  // ===== HÀM TỰ ĐỘNG TÍNH TOÁN % =====
+  void _onTempChanged(String val) {
+    final temp = double.tryParse(val);
+    if (temp != null) {
+      setState(() {
+        _tempOffCtrl.text = (temp * 0.90).toStringAsFixed(1);   // 90%
+        _tempDangerCtrl.text = (temp * 1.20).toStringAsFixed(1); // 120%
+      });
+    } else {
+      setState(() {
+        _tempOffCtrl.text = '';
+        _tempDangerCtrl.text = '';
+      });
+    }
+  }
 
-    if ([tempOn, tempOff, tempDanger].any((v) => v == null) ||
-        [lightOn, lightOff].any((v) => v == null)) {
-      _showSnack('Vui lòng nhập số hợp lệ', isError: true);
+  void _onLightChanged(String val) {
+    final light = double.tryParse(val);
+    if (light != null) {
+      setState(() {
+        _lightOffCtrl.text = (light * 1.20).toInt().toString(); // 120%
+      });
+    } else {
+      setState(() {
+        _lightOffCtrl.text = '';
+      });
+    }
+  }
+
+  void _onHumiChanged(String val) {
+    final humi = double.tryParse(val);
+    if (humi != null) {
+      setState(() {
+        _humiOffCtrl.text = (humi * 0.90).toStringAsFixed(1); // 90%
+      });
+    } else {
+      setState(() {
+        _humiOffCtrl.text = '';
+      });
+    }
+  }
+
+  Future<void> _saveConfig() async {
+    // Validate 3 ngưỡng gốc
+    final tempOn  = double.tryParse(_tempOnCtrl.text);
+    final humiOn  = double.tryParse(_humiOnCtrl.text);
+    final lightOn = int.tryParse(_lightOnCtrl.text);
+
+    if (tempOn == null || humiOn == null || lightOn == null) {
+      _showSnack('Vui lòng nhập số hợp lệ cho Ngưỡng Gốc', isError: true);
       return;
     }
-    if (tempOff! >= tempOn!) {
-      _showSnack('Ngưỡng TẮT quạt phải nhỏ hơn ngưỡng BẬT', isError: true);
-      return;
-    }
-    if (lightOn! >= lightOff!) {
-      _showSnack('Ngưỡng tối phải nhỏ hơn ngưỡng sáng', isError: true);
-      return;
-    }
+
+    // Lấy giá trị đã tự tính để gửi xuống Server
+    final tempOff    = double.parse(_tempOffCtrl.text);
+    final tempDanger = double.parse(_tempDangerCtrl.text);
+    final humiOff    = double.parse(_humiOffCtrl.text);
+    final lightOff   = int.parse(_lightOffCtrl.text);
 
     setState(() => _isSaving = true);
 
@@ -62,6 +104,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         'tempOn':     tempOn,
         'tempOff':    tempOff,
         'tempDanger': tempDanger,
+        'humiOn':     humiOn,
+        'humiOff':    humiOff,
         'lightOn':    lightOn,
         'lightOff':   lightOff,
       });
@@ -128,16 +172,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
               children: [
                 _buildThresholdField(
                   controller: _tempOnCtrl,
-                  label: 'Nhiệt độ BẬT quạt (°C)',
+                  label: 'Nhiệt độ BẬT quạt (°C) [Ngưỡng Gốc]',
                   hint: 'Ví dụ: 30',
                   icon: Icons.thermostat_rounded,
+                  onChanged: _onTempChanged, // Bắt sự kiện khi gõ
                 ),
                 const SizedBox(height: 16),
                 _buildThresholdField(
                   controller: _tempOffCtrl,
-                  label: 'Nhiệt độ TẮT quạt (°C)',
-                  hint: 'Ví dụ: 27',
-                  icon: Icons.thermostat_rounded,
+                  label: 'Nhiệt độ TẮT quạt (Tự tính = 90%)',
+                  hint: '',
+                  icon: Icons.ac_unit_rounded,
+                  isReadOnly: true, // Khóa không cho sửa
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _buildSectionCard(
+              title: 'Cảm biến Độ ẩm',
+              icon: Icons.water_drop_outlined,
+              color: const Color(0xFF38BDF8),
+              children: [
+                _buildThresholdField(
+                  controller: _humiOnCtrl,
+                  label: 'Độ ẩm CAO — BẬT quạt (%) [Ngưỡng Gốc]',
+                  hint: 'Ví dụ: 80',
+                  icon: Icons.water_drop_rounded,
+                  onChanged: _onHumiChanged,
+                ),
+                const SizedBox(height: 16),
+                _buildThresholdField(
+                  controller: _humiOffCtrl,
+                  label: 'Độ ẩm THẤP — TẮT quạt (Tự tính = 90%)',
+                  hint: '',
+                  icon: Icons.water_drop_outlined,
+                  isReadOnly: true,
                 ),
               ],
             ),
@@ -149,16 +218,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
               children: [
                 _buildThresholdField(
                   controller: _lightOnCtrl,
-                  label: 'Ngưỡng tối — BẬT đèn (ADC)',
+                  label: 'Ngưỡng tối — BẬT đèn [Ngưỡng Gốc]',
                   hint: 'Ví dụ: 1000',
                   icon: Icons.wb_sunny_rounded,
+                  onChanged: _onLightChanged, // Bắt sự kiện khi gõ
                 ),
                 const SizedBox(height: 16),
                 _buildThresholdField(
                   controller: _lightOffCtrl,
-                  label: 'Ngưỡng sáng — TẮT đèn (ADC)',
-                  hint: 'Ví dụ: 1200',
-                  icon: Icons.wb_sunny_rounded,
+                  label: 'Ngưỡng sáng — TẮT đèn (Tự tính = 120%)',
+                  hint: '',
+                  icon: Icons.brightness_high_rounded,
+                  isReadOnly: true, // Khóa không cho sửa
                 ),
               ],
             ),
@@ -170,9 +241,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               children: [
                 _buildThresholdField(
                   controller: _tempDangerCtrl,
-                  label: 'Nhiệt độ NGUY HIỂM — kích còi (°C)',
-                  hint: 'Ví dụ: 35',
+                  label: 'Nhiệt độ NGUY HIỂM kích còi (Tự tính = 120%)',
+                  hint: '',
                   icon: Icons.crisis_alert_rounded,
+                  isReadOnly: true, // Khóa không cho sửa
                 ),
               ],
             ),
@@ -218,15 +290,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
       child: Row(
         children: [
-          const Icon(Icons.admin_panel_settings_rounded,
+          const Icon(Icons.auto_awesome_rounded,
               color: Color(0xFF6366F1), size: 20),
           const SizedBox(width: 12),
           Expanded(
             child: Text(
-              'Chỉ Admin mới truy cập được màn hình này.\nThay đổi sẽ được gửi trực tiếp xuống ESP32 qua MQTT.',
+              'Chế độ cấu hình thông minh: Nhập Ngưỡng Gốc, hệ thống sẽ tự động nội suy các ngưỡng Tắt và Báo động.',
               style: TextStyle(
                   fontSize: 13,
-                  color: Colors.white.withValues(alpha: 0.7),
+                  color: Colors.white.withValues(alpha: 0.8),
                   height: 1.5),
             ),
           ),
@@ -280,6 +352,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     required String label,
     required String hint,
     required IconData icon,
+    bool isReadOnly = false,
+    ValueChanged<String>? onChanged,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -287,21 +361,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
         Text(label,
             style: TextStyle(
                 fontSize: 13,
-                color: Colors.white.withValues(alpha: 0.6),
+                color: isReadOnly 
+                    ? Colors.white.withValues(alpha: 0.3) 
+                    : Colors.white.withValues(alpha: 0.6),
                 fontWeight: FontWeight.w500)),
         const SizedBox(height: 8),
         Container(
           decoration: BoxDecoration(
-            color: const Color(0xFF0A0E1A),
+            color: isReadOnly ? const Color(0xFF1E2433) : const Color(0xFF0A0E1A),
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-                color: Colors.white.withValues(alpha: 0.1), width: 1),
+                color: isReadOnly 
+                    ? Colors.transparent 
+                    : Colors.white.withValues(alpha: 0.1), 
+                width: 1),
           ),
           child: TextField(
             controller: controller,
+            readOnly: isReadOnly,
+            onChanged: onChanged,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            style: const TextStyle(
-                color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
+            style: TextStyle(
+                color: isReadOnly 
+                    ? Colors.white.withValues(alpha: 0.4) 
+                    : Colors.white, 
+                fontSize: 15, 
+                fontWeight: FontWeight.w600),
             decoration: InputDecoration(
               prefixIcon:
                   Icon(icon, color: Colors.white.withValues(alpha: 0.4), size: 18),

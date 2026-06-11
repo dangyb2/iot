@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:fl_chart/fl_chart.dart';
 import 'dart:convert';
+import 'dart:async';
 import '../config.dart';
+
 class HistoryScreen extends StatefulWidget {
   final String authHeader;
 
@@ -12,56 +14,89 @@ class HistoryScreen extends StatefulWidget {
   State<HistoryScreen> createState() => _HistoryScreenState();
 }
 
-class _HistoryScreenState extends State<HistoryScreen>
-    with SingleTickerProviderStateMixin {
+class _HistoryScreenState extends State<HistoryScreen> {
   static const String _baseUrl = AppConfig.baseUrl;
 
-  List<dynamic> _allData = [];
+  Map<String, dynamic> _latest = {};
   bool _isLoading = true;
   String? _error;
-  late TabController _tabController;
+  Timer? _timer;
+  String _selectedGroup = 'main'; // 'main' hoặc 'humi'
 
-  // Hiển thị bao nhiêu điểm gần nhất
-  int _displayCount = 30;
+  // Ngưỡng lấy từ backend
+  double _tempOn = 30.0;
+  double _tempDanger = 35.0;
+  double _humiOn = 80.0;
+  double _humiOff = 72.0;
+  double _lightOn = 1000.0;
+  double _lightOff = 1200.0;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-    _fetchHistory();
+    _fetchConfig();
+    _fetchLatest();
+    _timer = Timer.periodic(const Duration(seconds: 2), (_) {
+      _fetchLatest();
+      _fetchConfig();
+    });
   }
 
   @override
   void dispose() {
-    _tabController.dispose();
+    _timer?.cancel();
     super.dispose();
   }
 
-  Future<void> _fetchHistory() async {
-    setState(() { _isLoading = true; _error = null; });
+  Future<void> _fetchConfig() async {
+    try {
+      final response = await http.get(
+        Uri.parse('$_baseUrl/api/config'),
+        headers: {'Authorization': widget.authHeader},
+      ).timeout(const Duration(seconds: 6));
+      if (response.statusCode == 200) {
+        final cfg = jsonDecode(response.body) as Map<String, dynamic>;
+        setState(() {
+          _tempOn = (cfg['tempOn'] as num?)?.toDouble() ?? 30.0;
+          _tempDanger = (cfg['tempDanger'] as num?)?.toDouble() ?? 35.0;
+          _humiOn = (cfg['humiOn'] as num?)?.toDouble() ?? 80.0;
+          _humiOff = (cfg['humiOff'] as num?)?.toDouble() ?? 72.0;
+          _lightOn = (cfg['lightOn'] as num?)?.toDouble() ?? 1000.0;
+          _lightOff = (cfg['lightOff'] as num?)?.toDouble() ?? 1200.0;
+        });
+      }
+    } catch (_) {/* giữ giá trị cũ */}
+  }
+
+  Future<void> _fetchLatest() async {
     try {
       final response = await http.get(
         Uri.parse('$_baseUrl/api/data'),
         headers: {'Authorization': widget.authHeader},
-      ).timeout(const Duration(seconds: 10));
-
+      ).timeout(const Duration(seconds: 6));
       if (response.statusCode == 200) {
-        setState(() {
-          _allData = jsonDecode(response.body);
-          _isLoading = false;
-        });
-      } else {
-        setState(() { _error = 'Lỗi server: ${response.statusCode}'; _isLoading = false; });
+        final List<dynamic> all = jsonDecode(response.body);
+        if (all.isNotEmpty) {
+          setState(() {
+            _latest = all.last as Map<String, dynamic>;
+            _isLoading = false;
+            _error = null;
+          });
+        }
       }
     } catch (e) {
-      setState(() { _error = 'Không kết nối được server'; _isLoading = false; });
+      if (_isLoading) {
+        setState(() {
+          _error = 'Không kết nối được server';
+          _isLoading = false;
+        });
+      }
     }
   }
 
-  // Lấy N bản ghi gần nhất
-  List<dynamic> get _recentData {
-    if (_allData.length <= _displayCount) return _allData;
-    return _allData.sublist(_allData.length - _displayCount);
+  double _val(String key) {
+    final v = _latest[key];
+    return v == null ? 0 : (v as num).toDouble();
   }
 
   @override
@@ -70,7 +105,7 @@ class _HistoryScreenState extends State<HistoryScreen>
       backgroundColor: const Color(0xFF0A0E1A),
       appBar: AppBar(
         backgroundColor: const Color(0xFF151A28),
-        title: const Text('Lịch sử dữ liệu',
+        title: const Text('Giám sát realtime',
             style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18)),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_rounded),
@@ -78,323 +113,446 @@ class _HistoryScreenState extends State<HistoryScreen>
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh_rounded),
-            onPressed: _fetchHistory,
-          ),
+              icon: const Icon(Icons.refresh_rounded),
+              onPressed: () {
+                _fetchLatest();
+                _fetchConfig();
+              }),
         ],
-        bottom: TabBar(
-          controller: _tabController,
-          indicatorColor: const Color(0xFF6366F1),
-          labelColor: const Color(0xFF6366F1),
-          unselectedLabelColor: Colors.white54,
-          tabs: const [
-            Tab(icon: Icon(Icons.thermostat_rounded), text: 'Nhiệt độ'),
-            Tab(icon: Icon(Icons.wb_sunny_rounded), text: 'Ánh sáng'),
-          ],
-        ),
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator(color: Color(0xFF6366F1)))
+          ? const Center(child: CircularProgressIndicator())
           : _error != null
-              ? _buildError()
-              : _allData.isEmpty
-                  ? _buildEmpty()
-                  : Column(
-                      children: [
-                        _buildRangeSelector(),
-                        Expanded(
-                          child: TabBarView(
-                            controller: _tabController,
-                            children: [
-                              _buildTempTab(),
-                              _buildLightTab(),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
+              ? Center(child: Text(_error!, style: const TextStyle(color: Color(0xFFEF4444))))
+              : _buildContent(),
     );
   }
 
-  Widget _buildRangeSelector() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-      color: const Color(0xFF151A28),
-      child: Row(
-        children: [
-          Text('Hiển thị:',
-              style: TextStyle(color: Colors.white.withValues(alpha: 0.6), fontSize: 13)),
-          const SizedBox(width: 12),
-          ...[20, 30, 50, 100].map((n) => Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: GestureDetector(
-              onTap: () => setState(() => _displayCount = n),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: _displayCount == n
-                      ? const Color(0xFF6366F1)
-                      : const Color(0xFF0A0E1A),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: _displayCount == n
-                        ? const Color(0xFF6366F1)
-                        : Colors.white.withValues(alpha: 0.15),
-                  ),
-                ),
-                child: Text('$n',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: _displayCount == n ? Colors.white : Colors.white54,
-                    )),
-              ),
-            ),
-          )),
-          const Spacer(),
-          Text('${_recentData.length} bản ghi',
-              style: TextStyle(color: Colors.white.withValues(alpha: 0.4), fontSize: 12)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTempTab() {
-    final data = _recentData;
-    if (data.isEmpty) return _buildEmpty();
-
-    final spots = data.asMap().entries.map((e) {
-      final temp = (e.value['temperature'] as num).toDouble();
-      return FlSpot(e.key.toDouble(), temp);
-    }).toList();
-
-    final temps = spots.map((s) => s.y).toList();
-    final minY = (temps.reduce((a, b) => a < b ? a : b) - 2).clamp(0, 100).toDouble();
-    final maxY = (temps.reduce((a, b) => a > b ? a : b) + 2).toDouble();
-
+  Widget _buildContent() {
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(16),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildStatRow(temps, '°C', const Color(0xFFFB923C)),
-          const SizedBox(height: 20),
-          _buildChartCard(
-            title: 'Nhiệt độ theo thời gian',
-            color: const Color(0xFFFB923C),
-            spots: spots,
-            minY: minY,
-            maxY: maxY,
-            unit: '°C',
-            dangerLine: 30.0,
+          // 2 TAB
+          Row(
+            children: [
+              _buildTab('main', 'Cảm biến chính', Icons.dashboard_rounded),
+              const SizedBox(width: 8),
+              _buildTab('humi', '5 độ ẩm', Icons.water_drop_rounded),
+            ],
           ),
           const SizedBox(height: 16),
-          _buildFanStatusList(data),
+          if (_selectedGroup == 'main') _buildMainChart(),
+          if (_selectedGroup == 'humi') _buildHumiChart(),
+          const SizedBox(height: 16),
+          Text('Cập nhật mỗi 2 giây · Ngưỡng đồng bộ từ Settings',
+              style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.white.withValues(alpha: 0.4),
+                  fontStyle: FontStyle.italic)),
         ],
       ),
     );
   }
 
-  Widget _buildLightTab() {
-    final data = _recentData;
-    if (data.isEmpty) return _buildEmpty();
-
-    final spots = data.asMap().entries.map((e) {
-      final light = (e.value['lightLevel'] as num).toDouble();
-      return FlSpot(e.key.toDouble(), light);
-    }).toList();
-
-    final lights = spots.map((s) => s.y).toList();
-    final minY = (lights.reduce((a, b) => a < b ? a : b) - 100).clamp(0, 9999).toDouble();
-    final maxY = (lights.reduce((a, b) => a > b ? a : b) + 100).toDouble();
-
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        children: [
-          _buildStatRow(lights, 'lux', const Color(0xFFFBBF24)),
-          const SizedBox(height: 20),
-          _buildChartCard(
-            title: 'Ánh sáng theo thời gian',
-            color: const Color(0xFFFBBF24),
-            spots: spots,
-            minY: minY,
-            maxY: maxY,
-            unit: 'lux',
+  Widget _buildTab(String key, String label, IconData icon) {
+    final isSelected = _selectedGroup == key;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() => _selectedGroup = key),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            color: isSelected ? const Color(0xFF6366F1) : const Color(0xFF151A28),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+                color: isSelected
+                    ? const Color(0xFF6366F1)
+                    : Colors.white.withValues(alpha: 0.1)),
           ),
-        ],
+          child: Column(
+            children: [
+              Icon(icon, color: Colors.white, size: 20),
+              const SizedBox(height: 4),
+              Text(label,
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            ],
+          ),
+        ),
       ),
     );
   }
 
-  Widget _buildStatRow(List<double> values, String unit, Color color) {
-    final avg = values.reduce((a, b) => a + b) / values.length;
-    final min = values.reduce((a, b) => a < b ? a : b);
-    final max = values.reduce((a, b) => a > b ? a : b);
+  // ============= TAB 1: 4 CẢM BIẾN CHÍNH (Nhiệt + Sáng + Gió + Gần) =============
+  Widget _buildMainChart() {
+    final tempVal = _val('temp0');
+    // Backend lưu là 'lightLevel', fallback 'light' để tương thích
+    final lightVal = _latest['lightLevel'] != null
+        ? (_latest['lightLevel'] as num).toDouble()
+        : _val('light');
+    final windVal = _val('wind');
+    final distVal = _val('distance');
 
-    return Row(
+    // Chuẩn hoá thông minh: vượt ngưỡng nguy hiểm → chạm 80% (vạch đỏ)
+    final tempPct = _tempDanger > 0
+        ? (tempVal / _tempDanger * 80).clamp(0, 100).toDouble() : 0.0;
+    final lightPct = _lightOff > 0
+        ? (lightVal / _lightOff * 80).clamp(0, 100).toDouble() : 0.0;
+    final windPctClamped = (windVal / 70 * 80).clamp(0, 100).toDouble();
+    final distPct = ((400 - distVal) / (400 - 15) * 80).clamp(0, 100).toDouble();
+
+    // Giá trị thật để hiện trên đầu mỗi thanh
+    final realLabels = [
+      '${tempVal.toStringAsFixed(1)}°C',
+      '${lightVal.toInt()}',
+      '${windVal.toInt()}%',
+      '${distVal.toInt()}cm',
+    ];
+
+    // Hàm trộn 2 màu theo tỉ lệ 0..1
+    Color blend(Color cool, Color hot, double t) {
+      return Color.lerp(cool, hot, t.clamp(0.0, 1.0))!;
+    }
+
+    // Màu CHỦ ĐẠO của thanh tính theo NGƯỠNG từ Settings (không phải hardcode)
+    // → Khi user đổi ngưỡng, dải màu cũng thay đổi theo
+    final tempMain = blend(
+      const Color(0xFF3B82F6), // ≤ tempOff: xanh dương (mát)
+      const Color(0xFFEF4444), // ≥ tempDanger: đỏ (nguy hiểm)
+      (_tempDanger - 27.0).abs() < 0.01
+          ? 0.5
+          : (tempVal - 27.0) / (_tempDanger - 27.0),
+    );
+    final lightMain = blend(
+      const Color(0xFF312E81), // ≤ lightOn: tím đen (tối)
+      const Color(0xFFFEF08A), // ≥ lightOff: vàng (sáng)
+      (_lightOff - _lightOn).abs() < 0.01
+          ? 0.5
+          : (lightVal - _lightOn) / (_lightOff - _lightOn),
+    );
+    final windMain = blend(
+      const Color(0xFF67E8F9), // 0%: xanh nhạt (lặng)
+      const Color(0xFFEF4444), // 100%: đỏ (bão)
+      windVal / 100,
+    );
+    final distMain = blend(
+      const Color(0xFF22C55E), // ≥50cm: xanh lá (an toàn)
+      const Color(0xFFEF4444), // ≤15cm: đỏ (có người)
+      (50 - distVal.clamp(0, 50)) / 35,
+    );
+
+    return Column(
       children: [
-        _buildStatCard('Trung bình', '${avg.toStringAsFixed(1)}$unit', color),
-        const SizedBox(width: 12),
-        _buildStatCard('Thấp nhất', '${min.toStringAsFixed(1)}$unit',
-            Colors.blue.shade300),
-        const SizedBox(width: 12),
-        _buildStatCard('Cao nhất', '${max.toStringAsFixed(1)}$unit',
-            const Color(0xFFEF4444)),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFF151A28),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Column(
+            children: [
+              _buildStatRow('Nhiệt độ', tempVal.toStringAsFixed(1), '°C',
+                  const Color(0xFFFB923C), tempVal > _tempDanger),
+              const Divider(color: Color(0xFF1E2937)),
+              _buildStatRow('Ánh sáng', '${lightVal.toInt()}', 'ADC',
+                  const Color(0xFFFBBF24), lightVal > _lightOff),
+              const Divider(color: Color(0xFF1E2937)),
+              _buildStatRow('Sức gió', '${windVal.toInt()}', '%',
+                  const Color(0xFF34D399), windVal > 70),
+              const Divider(color: Color(0xFF1E2937)),
+              _buildStatRow('Khoảng cách', '${distVal.toInt()}', 'cm',
+                  const Color(0xFFA78BFA), distVal < 15 && distVal > 0),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        _buildBarChartCard(
+          title: 'So sánh 4 cảm biến (% và giá trị thật)',
+          unit: '%',
+          values: [tempPct, lightPct, windPctClamped, distPct],
+          labels: ['Nhiệt', 'Sáng', 'Gió', 'Gần'],
+          realValueLabels: realLabels,
+          maxY: 100,
+          threshold1: 50,
+          threshold1Label: 'Trung bình (50%)',
+          threshold1Color: const Color(0xFFFBBF24),
+          threshold2: 80,
+          threshold2Label: 'Cao (80%)',
+          threshold2Color: const Color(0xFFEF4444),
+          // Mỗi thanh dùng 1 màu chính (gradient nhẹ nhạt-đậm cho có chiều sâu)
+          barGradients: [
+            [tempMain.withValues(alpha: 0.7), tempMain],
+            [lightMain.withValues(alpha: 0.7), lightMain],
+            [windMain.withValues(alpha: 0.7), windMain],
+            [distMain.withValues(alpha: 0.7), distMain],
+          ],
+          getBarColor: (v) => const Color(0xFF6366F1),
+        ),
       ],
     );
   }
 
-  Widget _buildStatCard(String label, String value, Color color) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: const Color(0xFF151A28),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: color.withValues(alpha: 0.25), width: 1),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(label,
-                style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.white.withValues(alpha: 0.5),
-                    fontWeight: FontWeight.w500)),
-            const SizedBox(height: 4),
-            Text(value,
-                style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                    color: color)),
-          ],
-        ),
+  // ============= TAB 2: 5 ĐỘ ẨM =============
+  Widget _buildHumiChart() {
+    final humis = [_val('humi0'), _val('humi1'), _val('humi2'), _val('humi3'), _val('humi4')];
+
+    Color blend(Color cool, Color hot, double t) {
+      return Color.lerp(cool, hot, t.clamp(0.0, 1.0))!;
+    }
+
+    // Mỗi thanh đổi màu theo giá trị độ ẩm so với ngưỡng từ Settings
+    // ≤ humiOff: xanh nhạt (khô/khô vừa)
+    // ≥ humiOn: đỏ (ẩm cao, bật quạt)
+    final List<List<Color>> humiGradients = humis.map((v) {
+      final t = (_humiOn - _humiOff).abs() < 0.01
+          ? 0.5
+          : (v - _humiOff) / (_humiOn - _humiOff);
+      final mainColor = blend(
+        const Color(0xFF38BDF8), // xanh nhạt: ẩm thấp
+        const Color(0xFFEF4444), // đỏ: ẩm cao
+        t,
+      );
+      return [mainColor.withValues(alpha: 0.7), mainColor];
+    }).toList();
+
+    return _buildBarChartCard(
+      title: 'Độ ẩm 5 cảm biến',
+      unit: '%',
+      values: humis,
+      labels: ['CB 1', 'CB 2', 'CB 3', 'CB 4', 'CB 5'],
+      maxY: 100,
+      threshold1: _humiOff,
+      threshold1Label: 'Tắt quạt (${_humiOff.toStringAsFixed(0)}%)',
+      threshold1Color: const Color(0xFFFBBF24),
+      threshold2: _humiOn,
+      threshold2Label: 'Bật quạt (${_humiOn.toStringAsFixed(0)}%)',
+      threshold2Color: const Color(0xFFEF4444),
+      barGradients: humiGradients,
+      getBarColor: (v) => const Color(0xFF38BDF8),
+    );
+  }
+
+  Widget _buildStatRow(String label, String value, String unit, Color color, bool isDanger) {
+    IconData icon;
+    if (label == 'Ánh sáng') {
+      icon = Icons.wb_sunny_rounded;
+    } else if (label == 'Sức gió') {
+      icon = Icons.air_rounded;
+    } else if (label == 'Nhiệt độ') {
+      icon = Icons.thermostat_rounded;
+    } else {
+      icon = Icons.straighten_rounded;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        children: [
+          Container(
+            width: 36, height: 36,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(icon, color: color, size: 18),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(label,
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+          ),
+          Text(value,
+              style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w700,
+                  color: isDanger ? const Color(0xFFEF4444) : color)),
+          const SizedBox(width: 4),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 2),
+            child: Text(unit,
+                style: TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.5))),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildChartCard({
+  Widget _buildBarChartCard({
     required String title,
-    required Color color,
-    required List<FlSpot> spots,
-    required double minY,
-    required double maxY,
     required String unit,
-    double? dangerLine,
+    required List<double> values,
+    required List<String> labels,
+    List<String>? realValueLabels,
+    List<List<Color>>? barGradients, // Mỗi thanh có 1 gradient riêng [colorTop, colorBottom]
+    required double maxY,
+    required double threshold1,
+    required String threshold1Label,
+    required Color threshold1Color,
+    required double threshold2,
+    required String threshold2Label,
+    required Color threshold2Color,
+    required Color Function(double) getBarColor,
   }) {
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 16),
       decoration: BoxDecoration(
         color: const Color(0xFF151A28),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: color.withValues(alpha: 0.2), width: 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
             children: [
-              Container(
-                width: 12,
-                height: 12,
-                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-              ),
-              const SizedBox(width: 8),
-              Text(title,
-                  style: const TextStyle(
-                      fontSize: 14, fontWeight: FontWeight.w600)),
-              if (dangerLine != null) ...[
-                const SizedBox(width: 12),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFEF4444).withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text('Ngưỡng ${dangerLine.toStringAsFixed(0)}$unit',
-                      style: const TextStyle(
-                          fontSize: 10,
-                          color: Color(0xFFEF4444),
-                          fontWeight: FontWeight.w600)),
-                ),
-              ]
+              _legendDot(threshold1Color, threshold1Label),
+              _legendDot(threshold2Color, threshold2Label),
             ],
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 16),
           SizedBox(
-            height: 200,
-            child: LineChart(
-              LineChartData(
-                minY: minY,
+            height: 280,
+            child: Stack(
+              children: [
+                BarChart(
+              BarChartData(
                 maxY: maxY,
-                gridData: FlGridData(
-                  show: true,
-                  drawVerticalLine: false,
-                  getDrawingHorizontalLine: (value) => FlLine(
-                    color: Colors.white.withValues(alpha: 0.05),
-                    strokeWidth: 1,
+                minY: 0,
+                alignment: BarChartAlignment.spaceAround,
+                barTouchData: BarTouchData(
+                  enabled: true,
+                  touchTooltipData: BarTouchTooltipData(
+                    getTooltipColor: (_) => const Color(0xFF1E2937),
+                    getTooltipItem: (group, _, rod, __) {
+                      return BarTooltipItem(
+                        '${labels[group.x]}\n${rod.toY.toStringAsFixed(1)} $unit',
+                        const TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.w600, fontSize: 12),
+                      );
+                    },
                   ),
                 ),
-                borderData: FlBorderData(show: false),
                 titlesData: FlTitlesData(
                   leftTitles: AxisTitles(
                     sideTitles: SideTitles(
                       showTitles: true,
                       reservedSize: 40,
-                      getTitlesWidget: (value, meta) => Text(
-                        value.toStringAsFixed(0),
-                        style: TextStyle(
-                            fontSize: 10,
-                            color: Colors.white.withValues(alpha: 0.4)),
-                      ),
+                      interval: maxY / 5,
+                      getTitlesWidget: (v, _) => Text(v.toInt().toString(),
+                          style: const TextStyle(color: Colors.white38, fontSize: 11)),
                     ),
                   ),
                   bottomTitles: AxisTitles(
-                    sideTitles: SideTitles(showTitles: false),
-                  ),
-                  topTitles: AxisTitles(
-                    sideTitles: SideTitles(showTitles: false),
-                  ),
-                  rightTitles: AxisTitles(
-                    sideTitles: SideTitles(showTitles: false),
-                  ),
-                ),
-                extraLinesData: dangerLine != null
-                    ? ExtraLinesData(horizontalLines: [
-                        HorizontalLine(
-                          y: dangerLine,
-                          color: const Color(0xFFEF4444).withValues(alpha: 0.6),
-                          strokeWidth: 1.5,
-                          dashArray: [6, 4],
-                        ),
-                      ])
-                    : null,
-                lineBarsData: [
-                  LineChartBarData(
-                    spots: spots,
-                    isCurved: true,
-                    color: color,
-                    barWidth: 2.5,
-                    dotData: FlDotData(show: spots.length <= 20),
-                    belowBarData: BarAreaData(
-                      show: true,
-                      color: color.withValues(alpha: 0.08),
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 32,
+                      getTitlesWidget: (v, _) {
+                        final i = v.toInt();
+                        if (i < 0 || i >= labels.length) return const SizedBox();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Text(labels[i],
+                              style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w500)),
+                        );
+                      },
                     ),
                   ),
-                ],
-                lineTouchData: LineTouchData(
-                  touchTooltipData: LineTouchTooltipData(
-                    getTooltipItems: (spots) => spots.map((s) =>
-                      LineTooltipItem(
-                        '${s.y.toStringAsFixed(1)} $unit',
-                        TextStyle(
-                            color: color,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13),
-                      )).toList(),
-                  ),
+                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                ),
+                gridData: FlGridData(
+                  show: true,
+                  drawVerticalLine: false,
+                  horizontalInterval: maxY / 5,
+                  getDrawingHorizontalLine: (v) => FlLine(
+                      color: Colors.white.withValues(alpha: 0.05), strokeWidth: 1),
+                ),
+                borderData: FlBorderData(show: false),
+                barGroups: List.generate(values.length, (i) {
+                  final v = values[i];
+                  final color = getBarColor(v);
+                  final hasGradient = barGradients != null && i < barGradients.length;
+                  return BarChartGroupData(
+                    x: i,
+                    barRods: [
+                      BarChartRodData(
+                        toY: v,
+                        color: hasGradient ? null : color,
+                        gradient: hasGradient
+                            ? LinearGradient(
+                                colors: barGradients[i],
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                              )
+                            : null,
+                        width: 28,
+                        borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
+                        backDrawRodData: BackgroundBarChartRodData(
+                          show: true,
+                          toY: maxY,
+                          color: Colors.white.withValues(alpha: 0.03),
+                        ),
+                      ),
+                    ],
+                  );
+                }),
+                extraLinesData: ExtraLinesData(
+                  horizontalLines: [
+                    HorizontalLine(
+                      y: threshold1,
+                      color: threshold1Color,
+                      strokeWidth: 1.5,
+                      dashArray: [5, 5],
+                    ),
+                    HorizontalLine(
+                      y: threshold2,
+                      color: threshold2Color,
+                      strokeWidth: 1.5,
+                      dashArray: [5, 5],
+                    ),
+                  ],
                 ),
               ),
+              duration: const Duration(milliseconds: 400),
+            ),
+                // Overlay: label giá trị thật trên đầu mỗi thanh
+                if (realValueLabels != null)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 40, right: 8, bottom: 40),
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        final chartHeight = constraints.maxHeight;
+                        return Stack(
+                          children: List.generate(values.length, (i) {
+                            final barTopY = chartHeight * (1 - values[i] / maxY);
+                            final widthPerBar = constraints.maxWidth / values.length;
+                            return Positioned(
+                              left: i * widthPerBar,
+                              top: (barTopY - 22).clamp(0, chartHeight - 18).toDouble(),
+                              width: widthPerBar,
+                              child: Text(
+                                realValueLabels[i],
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            );
+                          }),
+                        );
+                      },
+                    ),
+                  ),
+              ],
             ),
           ),
         ],
@@ -402,108 +560,22 @@ class _HistoryScreenState extends State<HistoryScreen>
     );
   }
 
-  Widget _buildFanStatusList(List<dynamic> data) {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: const Color(0xFF151A28),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-            color: Colors.white.withValues(alpha: 0.06), width: 1),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('Trạng thái thiết bị gần nhất',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 16),
-          ...data.reversed.take(8).map((item) {
-            final fan = item['fanStatus'] == 1;
-            final led = item['ledStatus'] == 1;
-            final temp = (item['temperature'] as num).toDouble();
-            final ts = item['timestamp'] != null
-                ? _formatTime(item['timestamp'].toString())
-                : '--:--';
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Row(
-                children: [
-                  Text(ts,
-                      style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.white.withValues(alpha: 0.4),
-                          fontFamily: 'monospace')),
-                  const SizedBox(width: 12),
-                  Text('${temp.toStringAsFixed(1)}°C',
-                      style: const TextStyle(
-                          fontSize: 13, fontWeight: FontWeight.w600)),
-                  const Spacer(),
-                  _statusPill('Quạt', fan, const Color(0xFF22D3EE)),
-                  const SizedBox(width: 8),
-                  _statusPill('Đèn', led, const Color(0xFFFBBF24)),
-                ],
-              ),
-            );
-          }),
-        ],
-      ),
-    );
-  }
-
-  Widget _statusPill(String label, bool isOn, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: isOn ? color.withValues(alpha: 0.15) : Colors.white.withValues(alpha: 0.05),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Text('$label ${isOn ? "ON" : "OFF"}',
-          style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-              color: isOn ? color : Colors.white38)),
-    );
-  }
-
-  String _formatTime(String iso) {
-    try {
-      final dt = DateTime.parse(iso).toLocal();
-      return '${dt.hour.toString().padLeft(2,'0')}:${dt.minute.toString().padLeft(2,'0')}';
-    } catch (_) {
-      return '--:--';
-    }
-  }
-
-  Widget _buildError() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(Icons.wifi_off_rounded, color: Color(0xFFEF4444), size: 48),
-          const SizedBox(height: 16),
-          Text(_error!, style: const TextStyle(color: Colors.white54)),
-          const SizedBox(height: 20),
-          ElevatedButton(
-            onPressed: _fetchHistory,
-            style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF6366F1)),
-            child: const Text('Thử lại'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildEmpty() {
-    return const Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.inbox_rounded, color: Colors.white24, size: 48),
-          SizedBox(height: 16),
-          Text('Chưa có dữ liệu', style: TextStyle(color: Colors.white38)),
-        ],
-      ),
+  Widget _legendDot(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 16,
+          height: 2,
+          decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(1)),
+        ),
+        const SizedBox(width: 6),
+        Text(label,
+            style: TextStyle(
+                fontSize: 11,
+                color: Colors.white.withValues(alpha: 0.7),
+                fontWeight: FontWeight.w500)),
+      ],
     );
   }
 }

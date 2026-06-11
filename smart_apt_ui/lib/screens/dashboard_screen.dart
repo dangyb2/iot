@@ -27,8 +27,11 @@ class _DashboardScreenState extends State<DashboardScreen>
     with TickerProviderStateMixin {
   String latestTemp = "--";
   String latestLight = "--";
+  String latestHumi = "--";
+  String latestDist = "--";
+  String latestWind = "--";
   int fanStatus = 0;
-  int ledStatus = 0;
+  List<int> ledStates = [0, 0, 0, 0, 0];
   bool isFanManual = false;
   bool isLedManual = false;
   bool isFanLocked = false;
@@ -93,14 +96,40 @@ class _DashboardScreenState extends State<DashboardScreen>
         if (data.isNotEmpty) {
           var newestReading = data.last;
           setState(() {
-            latestTemp = newestReading['temperature'].toStringAsFixed(1);
+            // Nhiệt độ trung bình 5 phòng (hoặc temp0)
+            latestTemp = (newestReading['temp0'] ?? newestReading['temperature'])
+                .toStringAsFixed(1);
+            // Độ ẩm trung bình (humi0)
+			final h0 = (newestReading['humi0'] as num?)?.toDouble() ?? 0.0;
+            final h1 = (newestReading['humi1'] as num?)?.toDouble() ?? 0.0;
+            final h2 = (newestReading['humi2'] as num?)?.toDouble() ?? 0.0;
+            final h3 = (newestReading['humi3'] as num?)?.toDouble() ?? 0.0;
+            final h4 = (newestReading['humi4'] as num?)?.toDouble() ?? 0.0;
+
+            // Nếu h0 = 0 (mất dữ liệu) thì giữ nguyên "--", nếu có thì tính trung bình
+            if (newestReading['humi0'] != null) {
+              final avgHumi = (h0 + h1 + h2 + h3 + h4) / 5;
+              latestHumi = avgHumi.toStringAsFixed(0);
+            } else {
+              latestHumi = "--";
+            }
             latestLight = newestReading['lightLevel'].toString();
+            // Khoảng cách & gió mới
+            final d = newestReading['distance'];
+            latestDist = d != null ? d.toStringAsFixed(0) : "--";
+            final w = newestReading['wind'];
+            latestWind = w != null ? w.toString() : "--";
+
             if (!isFanLocked) {
               fanStatus = newestReading['fanStatus'];
               isFanManual = newestReading['fanManual'] ?? false;
             }
             if (!isLedLocked) {
-              ledStatus = newestReading['ledStatus'];
+              // Đọc trạng thái 5 LED riêng (led0-led4), fallback ledStatus
+              for (int i = 0; i < 5; i++) {
+                final v = newestReading['led$i'];
+                if (v != null) ledStates[i] = v;
+              }
               isLedManual = newestReading['ledManual'] ?? false;
             }
             lastDataReceived = DateTime.now();
@@ -132,15 +161,10 @@ class _DashboardScreenState extends State<DashboardScreen>
   Future<void> toggleDevice(String device, bool isOn) async {
     int status = isOn ? 1 : 0;
     setState(() {
-      if (device == 'fan') {
-        fanStatus = status;
-        isFanManual = true;
-        isFanLocked = true;
-      } else {
-        ledStatus = status;
-        isLedManual = true;
-        isLedLocked = true;
-      }
+      // Chỉ còn dùng cho quạt (LED đã chuyển sang toggleLed riêng)
+      fanStatus = status;
+      isFanManual = true;
+      isFanLocked = true;
     });
 
     try {
@@ -159,6 +183,27 @@ class _DashboardScreenState extends State<DashboardScreen>
           if (device == 'led') isLedLocked = false;
         });
       }
+    });
+  }
+
+  // Điều khiển từng LED riêng (index 0-4)
+  Future<void> toggleLed(int index, bool isOn) async {
+    int status = isOn ? 1 : 0;
+    setState(() {
+      ledStates[index] = status;
+      isLedManual = true;
+      isLedLocked = true;
+    });
+    try {
+      await http.post(
+        Uri.parse('${AppConfig.baseUrl}/api/control/led/$index?status=$status'),
+        headers: {'Authorization': widget.authHeader},
+      );
+    } catch (e) {
+      // ignore
+    }
+    Future.delayed(const Duration(seconds: 3), () {
+      if (mounted) setState(() => isLedLocked = false);
     });
   }
 
@@ -265,16 +310,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                 onAuto: () => setAutoMode('fan'),
               ),
               const SizedBox(height: 16),
-              _buildDeviceCard(
-                title: "Main LED Light",
-                subtitle: ledStatus == 1 ? "Illuminated" : "Off",
-                icon: Icons.lightbulb_outline,
-                isOn: ledStatus == 1,
-                isManual: isLedManual,
-                accentColor: const Color(0xFFFBBF24),
-                onToggle: (v) => toggleDevice('led', v),
-                onAuto: () => setAutoMode('led'),
-              ),
+              _buildLedGrid(),
               const SizedBox(height: 24),
 
               // CẨN THẬN: Chỉ hiển thị nút MUTE nếu KHÔNG phải là Guest
@@ -478,29 +514,73 @@ class _DashboardScreenState extends State<DashboardScreen>
   }
 
   Widget _buildSensorRow() {
-    return Row(
+    return Column(
       children: [
-        Expanded(
-          child: _buildSensorCard(
-            label: "Temperature",
-            value: latestTemp,
-            unit: "°C",
-            icon: Icons.thermostat_rounded,
-            accent: const Color(0xFFFB923C),
-            isHighlight: double.tryParse(latestTemp) != null &&
-                double.parse(latestTemp) > 30,
-          ),
+        // Hàng 1: Nhiệt độ + Độ ẩm
+        Row(
+          children: [
+            Expanded(
+              child: _buildSensorCard(
+                label: "Temperature",
+                value: latestTemp,
+                unit: "°C",
+                icon: Icons.thermostat_rounded,
+                accent: const Color(0xFFFB923C),
+                isHighlight: double.tryParse(latestTemp) != null &&
+                    double.parse(latestTemp) > 30,
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: _buildSensorCard(
+                label: "Humidity",
+                value: latestHumi,
+                unit: "%",
+                icon: Icons.water_drop_rounded,
+                accent: const Color(0xFF38BDF8),
+                isHighlight: false,
+              ),
+            ),
+          ],
         ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: _buildSensorCard(
-            label: "Light Level",
-            value: latestLight,
-            unit: "lux",
-            icon: Icons.wb_sunny_rounded,
-            accent: const Color(0xFFFBBF24),
-            isHighlight: false,
-          ),
+        const SizedBox(height: 16),
+        // Hàng 2: Ánh sáng + Khoảng cách + Gió
+        Row(
+          children: [
+            Expanded(
+              child: _buildSensorCard(
+                label: "Light",
+                value: latestLight,
+                unit: "lux",
+                icon: Icons.wb_sunny_rounded,
+                accent: const Color(0xFFFBBF24),
+                isHighlight: false,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _buildSensorCard(
+                label: "Distance",
+                value: latestDist,
+                unit: "cm",
+                icon: Icons.straighten_rounded,
+                accent: const Color(0xFFA78BFA),
+                isHighlight: double.tryParse(latestDist) != null &&
+                    double.parse(latestDist) < 15,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _buildSensorCard(
+                label: "Wind",
+                value: latestWind,
+                unit: "%",
+                icon: Icons.air_rounded,
+                accent: const Color(0xFF34D399),
+                isHighlight: false,
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -515,7 +595,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     required bool isHighlight,
   }) {
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
@@ -557,22 +637,26 @@ class _DashboardScreenState extends State<DashboardScreen>
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 300),
-                child: Text(value,
-                    key: ValueKey(value),
-                    style: const TextStyle(
-                        fontSize: 36,
-                        fontWeight: FontWeight.w700,
-                        height: 1,
-                        letterSpacing: -1)),
+              Flexible(
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 300),
+                  child: Text(value,
+                      key: ValueKey(value),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w700,
+                          height: 1,
+                          letterSpacing: -1)),
+                ),
               ),
-              const SizedBox(width: 4),
+              const SizedBox(width: 3),
               Padding(
-                padding: const EdgeInsets.only(bottom: 4),
+                padding: const EdgeInsets.only(bottom: 3),
                 child: Text(unit,
                     style: TextStyle(
-                        fontSize: 14,
+                        fontSize: 12,
                         color: Colors.white.withValues(alpha: 0.5),
                         fontWeight: FontWeight.w500)),
               ),
@@ -696,6 +780,100 @@ class _DashboardScreenState extends State<DashboardScreen>
                 ),
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLedGrid() {
+    final isGuest = widget.role.contains('GUEST');
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF151A28),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05), width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.lightbulb_outline, color: Color(0xFFFBBF24), size: 20),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text("5 đèn LED",
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+              ),
+              _buildModePill(isLedManual),
+            ],
+          ),
+          const SizedBox(height: 12),
+          ...List.generate(5, (i) {
+            final on = ledStates[i] == 1;
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              child: Row(
+                children: [
+                  Container(
+                    width: 32, height: 32,
+                    decoration: BoxDecoration(
+                      color: on
+                          ? const Color(0xFFFBBF24).withValues(alpha: 0.15)
+                          : Colors.white.withValues(alpha: 0.05),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(Icons.lightbulb,
+                        size: 16,
+                        color: on ? const Color(0xFFFBBF24) : Colors.white.withValues(alpha: 0.3)),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text("LED ${i + 1}",
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                  ),
+                  Text(on ? "ON" : "OFF",
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: on ? const Color(0xFFFBBF24) : Colors.white.withValues(alpha: 0.4))),
+                  const SizedBox(width: 8),
+                  Switch(
+                    value: on,
+                    onChanged: isGuest ? null : (v) => toggleLed(i, v),
+                    activeThumbColor: Colors.white,
+                    activeTrackColor: const Color(0xFFFBBF24),
+                    inactiveThumbColor: Colors.white.withValues(alpha: 0.6),
+                    inactiveTrackColor: Colors.white.withValues(alpha: 0.1),
+                  ),
+                ],
+              ),
+            );
+          }),
+          if (!isGuest) ...[
+            Container(
+                height: 1,
+                margin: const EdgeInsets.symmetric(vertical: 8),
+                color: Colors.white.withValues(alpha: 0.05)),
+            InkWell(
+              onTap: () => setAutoMode('led'),
+              child: const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.autorenew_rounded, color: Color(0xFF6366F1), size: 18),
+                    SizedBox(width: 8),
+                    Text("Chuyển tất cả về Auto",
+                        style: TextStyle(
+                            color: Color(0xFF6366F1),
+                            fontWeight: FontWeight.w500,
+                            fontSize: 14)),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
