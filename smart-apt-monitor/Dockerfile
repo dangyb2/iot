@@ -1,12 +1,18 @@
-FROM eclipse-temurin:25-jdk-alpine
-# Set the working directory inside the container
+# Build source code thành file .jar
+FROM maven:3.9.6-eclipse-temurin-21 AS build
 WORKDIR /app
 
-# Copy the compiled .jar file into the container
-COPY target/smart-apt-monitor-0.0.1-SNAPSHOT.jar app.jar
+COPY pom.xml .
+COPY src ./src
 
-# Expose the API port
+RUN mvn clean package -DskipTests
+
+# Chạy file .jar vừa build
+FROM eclipse-temurin:21-jdk
+WORKDIR /app
+
+COPY --from=build /app/target/*.jar app.jar
+
 EXPOSE 8080
 
-# Run the Spring Boot app
 ENTRYPOINT ["java", "-jar", "app.jar"]
