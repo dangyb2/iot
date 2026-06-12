@@ -1,36 +1,24 @@
 version: '3.8'
 
 services:
-  mosquitto:
-    image: eclipse-mosquitto:latest     # <--- Changed this line!
-    container_name: iot-mosquitto
-    ports:
-      - "1883:1883"
-    volumes:
-      # Mounts your local config file into the container
-      - ./mosquitto_config/mosquitto.conf:/mosquitto/config/mosquitto.conf
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-
   backend:
     build: .
     container_name: smart-home-backend
     ports:
       - "8080:8080"
-    depends_on:
-      - mosquitto
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       JAVA_TOOL_OPTIONS: "-Xmx256M -Xms256M -Dfile.encoding=UTF-8"
-      MQTT_BROKER_URL: "tcp://mosquitto:1883"
-      # Talk to the local database via host.docker.internal
-      SPRING_DATASOURCE_URL: "jdbc:sqlserver://host.docker.internal:1433;databaseName=SmartAptDB;encrypt=true;trustServerCertificate=true;"
-      SPRING_DATASOURCE_USERNAME: "sa"
-      SPRING_DATASOURCE_PASSWORD: "123"
-    deploy:
+      
+      # ── 1. CẤU HÌNH HIVEMQ CLOUD (MQTT BẢO MẬT SSL) ──
+      MQTT_BROKER_URL: "ssl://c84e73f4fb39481295fc29855bdd5613.s1.eu.hivemq.cloud:8883"
+      MQTT_USERNAME: "dangyb"
+      MQTT_PASSWORD: "Asher@B@l@nc0urt"
+      
+      SPRING_DATASOURCE_URL: "jdbc:postgresql://aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
+      SPRING_DATASOURCE_USERNAME: "postgres.fgoznfptwhbcliiuobvu"
+      SPRING_DATASOURCE_PASSWORD: "Asher@B@l@nc0urt"
+      
+    deploy: 
       resources:
         limits:
           memory: 512M

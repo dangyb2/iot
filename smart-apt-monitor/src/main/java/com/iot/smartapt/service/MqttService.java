@@ -1,10 +1,10 @@
 package com.iot.smartapt.service;
 
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
-import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.eclipse.paho.client.mqttv3.*;
-
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
@@ -23,17 +23,37 @@ public class MqttService {
     @Autowired
     private DeviceStatusService statusService;
 
+    @Value("${mqtt.broker.url}")
+    private String brokerUrl;
+
+    @Value("${mqtt.username:}")
+    private String mqttUsername;
+
+    @Value("${mqtt.password:}")
+    private String mqttPassword;
+
+    @Value("${mqtt.client.id}")
+    private String clientId;
     @PostConstruct
     public void connectToBroker() {
         try {
-            String brokerUrl = System.getenv("MQTT_BROKER_URL") != null
-                    ? System.getenv("MQTT_BROKER_URL")
-                    : "tcp://192.168.137.1:1883";
+            System.out.println("🔌 Connecting to MQTT: " + brokerUrl);
+            client = new MqttClient(brokerUrl, clientId, new MemoryPersistence());
 
-            client = new MqttClient(brokerUrl, MqttClient.generateClientId(), new MemoryPersistence());
-            client.connect();
-            System.out.println("✅ Spring Boot connected to Mosquitto Broker!");
+            MqttConnectOptions options = new MqttConnectOptions();
+            options.setAutomaticReconnect(true);
+            options.setCleanSession(true);
+            options.setConnectionTimeout(30);
+            options.setKeepAliveInterval(60);
 
+            if (mqttUsername != null && !mqttUsername.isEmpty()) {
+                options.setUserName(mqttUsername);
+                options.setPassword(mqttPassword.toCharArray());
+                System.out.println("🔐 Using MQTT auth: " + mqttUsername);
+            }
+
+            client.connect(options);
+            System.out.println("✅ Spring Boot connected to MQTT Broker!");
             ObjectMapper mapper = new ObjectMapper();
 
             // Subscribe trạng thái thiết bị (LWT)
